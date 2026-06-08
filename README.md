@@ -1,190 +1,265 @@
-# Real-Time Fake Job Detector
+<div align="center">
 
-A production-grade streaming data pipeline that detects fraudulent job postings in real time using Apache Kafka, Apache Spark, and a trained Machine Learning model — all wired together with a live Next.js dashboard.
+# 🔍 Real-Time Fake Job Detector
 
----
+**A production-grade streaming data pipeline that detects fraudulent job postings in real time.**
 
-## Architecture
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-3.8-231F20?style=for-the-badge&logo=apachekafka&logoColor=white)](https://kafka.apache.org)
+[![Apache Spark](https://img.shields.io/badge/Apache_Spark-3.5.3-E25A1C?style=for-the-badge&logo=apachespark&logoColor=white)](https://spark.apache.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![Next.js](https://img.shields.io/badge/Next.js-16-000000?style=for-the-badge&logo=nextdotjs&logoColor=white)](https://nextjs.org)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://postgresql.org)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://docker.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)](LICENSE)
 
-```
-CSV Dataset
-    │
-    ▼
-Kafka Producer ──► Kafka Topic (jobs)
-                        │
-                        ▼
-              Spark Structured Streaming
-              ├─ TF-IDF + Random Forest ML inference
-              ├─ Anomaly detection (EMA-based spike detection)
-              └─ Fraud cluster analysis (cosine similarity)
-                        │
-                        ▼
-                  PostgreSQL Database
-                        │
-                        ▼
-              FastAPI (REST + WebSocket)
-                        │
-                        ▼
-              Next.js Dashboard (live charts, alerts)
-```
+[Features](#-features) • [Architecture](#-architecture) • [Quick Start](#-quick-start) • [ML Model](#-ml-model-performance) • [API Docs](#-api-reference) • [Contributing](#-contributing)
 
-**Tech Stack:** Python · Apache Kafka · Apache Spark (PySpark) · scikit-learn · PostgreSQL · FastAPI · Next.js 16 · Docker
+</div>
 
 ---
 
-## ML Model Performance
+## 📌 Overview
 
-Trained on the [Kaggle Fake Job Postings dataset](https://www.kaggle.com/datasets/shivamb/real-or-fake-fake-jobposting-prediction) (17,880 rows).
+Job boards are flooded with fraudulent postings designed to steal personal data or money. This system automatically flags fake jobs **the moment they are posted** — no manual review required.
 
-| Metric    | Score  |
-|-----------|--------|
-| Accuracy  | 98.0%  |
-| Precision | 100%   |
-| Recall    | 60.2%  |
-| F1-Score  | 75.2%  |
-
-Model selected: **Random Forest** (beat Logistic Regression on F1). Zero false positives — every job the model flags as fake is genuinely fake.
+Every job posting flows through a Kafka queue → Spark ML pipeline → PostgreSQL → FastAPI → live Next.js dashboard. Fraud decisions happen in under **5 seconds** with **100% precision** (zero false alarms).
 
 ---
 
-## Project Structure
+## ✨ Features
 
-```
-.
-├── docker-compose.yml          # Orchestrates all 7 services
-├── .env.example                # Copy to .env and fill in values
-├── start_system.py             # Windows local dev launcher (non-Docker)
-├── DOCKER_SETUP.md             # Detailed Docker setup guide
-│
-└── fake_job_detector/
-    ├── api/                    # FastAPI backend (REST + WebSocket)
-    │   ├── Dockerfile
-    │   └── app.py
-    ├── dashboard/              # Next.js real-time frontend
-    │   ├── Dockerfile
-    │   ├── app/                # Pages: dashboard, alerts, analytics, trends
-    │   ├── components/
-    │   ├── context/
-    │   └── services/
-    ├── kafka/                  # Kafka CSV replay producer
-    │   ├── Dockerfile
-    │   └── producer.py
-    ├── ml/                     # Model training pipeline
-    │   ├── train_model.py
-    │   ├── preprocess.py
-    │   └── saved_model/        # fraud_model.pkl + tfidf.pkl
-    ├── spark/                  # Spark Structured Streaming job
-    │   ├── Dockerfile
-    │   ├── docker-entrypoint.sh
-    │   ├── spark_stream.py
-    │   └── model_loader.py
-    ├── utils/                  # DB writer, helpers
-    ├── data/
-    │   └── raw/
-    │       └── fake_job_postings.csv
-    ├── requirements-api.txt
-    ├── requirements-spark.txt
-    └── requirements-producer.txt
-```
+| Feature | Description |
+|---------|-------------|
+| ⚡ **Real-time streaming** | Kafka → Spark micro-batches every 5 seconds |
+| 🤖 **ML inference at scale** | TF-IDF + Random Forest UDF runs across Spark workers |
+| 📈 **Anomaly detection** | EMA-based spike detection flags unusual fraud surges |
+| 🔗 **Fraud clustering** | Cosine similarity groups related fake jobs (≥ 0.8 threshold) |
+| ✏️ **Human corrections** | Manual override system with full correction audit trail |
+| 📡 **Live dashboard** | WebSocket-powered Next.js frontend with real-time charts |
+| 🪦 **Dead letter queue** | Failed events captured for manual investigation |
+| 🐳 **One-command deploy** | Full Docker Compose stack — 7 services, one command |
 
 ---
 
-## Quick Start (Docker — recommended)
+## 🏗 Architecture
 
-**Prerequisites:** Docker Desktop 24+, 6 GB RAM free, 10 GB disk space.
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     DATA FLOW                                    │
+│                                                                   │
+│  CSV Dataset                                                      │
+│      │                                                            │
+│      ▼                                                            │
+│  ┌──────────────┐     ┌──────────────────┐                       │
+│  │ Kafka        │────►│  Kafka Topic     │                       │
+│  │ Producer     │     │  (jobs)          │                       │
+│  └──────────────┘     └────────┬─────────┘                       │
+│                                │                                  │
+│                                ▼                                  │
+│                  ┌─────────────────────────┐                     │
+│                  │  Spark Structured       │                     │
+│                  │  Streaming              │                     │
+│                  │  ├─ TF-IDF + RF model   │                     │
+│                  │  ├─ Anomaly detection   │                     │
+│                  │  └─ Fraud clustering    │                     │
+│                  └────────────┬────────────┘                     │
+│                               │                                   │
+│                               ▼                                   │
+│                  ┌─────────────────────────┐                     │
+│                  │     PostgreSQL           │                     │
+│                  │  ├─ job_predictions      │                     │
+│                  │  ├─ job_clusters         │                     │
+│                  │  ├─ job_corrections      │                     │
+│                  │  └─ pipeline_metrics     │                     │
+│                  └────────────┬────────────┘                     │
+│                               │                                   │
+│                               ▼                                   │
+│                  ┌─────────────────────────┐                     │
+│                  │  FastAPI                 │                     │
+│                  │  REST + WebSocket        │                     │
+│                  └────────────┬────────────┘                     │
+│                               │                                   │
+│                               ▼                                   │
+│                  ┌─────────────────────────┐                     │
+│                  │  Next.js Dashboard       │                     │
+│                  │  Live charts & alerts    │                     │
+│                  └─────────────────────────┘                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Services
+
+| Service | Image | Port | Role |
+|---------|-------|------|------|
+| `fraud-postgres` | postgres:16-alpine | 5432 | Predictions database |
+| `fraud-kafka` | apache/kafka:3.8 | 9092 | KRaft message broker |
+| `fraud-spark-master` | custom | 7077 / 8080 | Spark cluster coordinator |
+| `fraud-spark-worker` | custom | 8081 | ML inference executor |
+| `fraud-spark-stream` | custom | 4040 | Streaming driver |
+| `fraud-api` | custom | 8000 | FastAPI REST + WebSocket |
+| `fraud-dashboard` | custom | 3001 | Next.js frontend |
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Docker Desktop 24+ 
+- 6 GB RAM available
+- 10 GB free disk space
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/<your-username>/bigdata.git
-cd bigdata
+git clone https://github.com/Veladicodes/Realtime-Fake-Job-Predictor.git
+cd Realtime-Fake-Job-Predictor
 
-# 2. Create your environment file
+# 2. Set up environment
 cp .env.example .env
-# Edit .env — set a strong POSTGRES_PASSWORD at minimum
+# ⚠️  Edit .env and set a strong POSTGRES_PASSWORD
 
-# 3. Build and start all services
+# 3. Launch everything
 docker compose up --build
 ```
 
-| Service            | URL                        |
-|--------------------|----------------------------|
-| Dashboard          | http://localhost:3001       |
-| FastAPI docs       | http://localhost:8000/docs  |
-| Spark Master UI    | http://localhost:8080       |
-| Spark Worker UI    | http://localhost:8081       |
+| Service | URL |
+|---------|-----|
+| 📊 Live Dashboard | http://localhost:3001 |
+| 📖 API Docs (Swagger) | http://localhost:8000/docs |
+| ⚡ Spark Master UI | http://localhost:8080 |
+| 🔧 Spark Worker UI | http://localhost:8081 |
 
-To stop everything:
 ```bash
+# Stop everything
 docker compose down
-```
 
-### Enable the Kafka producer (replay CSV into the pipeline)
-```bash
+# Also start the Kafka CSV producer (streams dataset into pipeline)
 docker compose --profile producer up
 ```
 
----
-
-## Running Locally (Windows, no Docker)
+### Windows Local Dev (no Docker)
 
 ```bash
-# 1. Create and activate virtual environment
 cd fake_job_detector
-python -m venv venv
-venv\Scripts\activate
-
-# 2. Install dependencies
+python -m venv venv && venv\Scripts\activate
 pip install -r requirements.txt
-
-# 3. Start all services (requires PostgreSQL + Kafka installed locally)
-python start_system.py
+python ../start_system.py
 ```
 
 ---
 
-## Training the ML Model
+## 🤖 ML Model Performance
 
-The trained model artifacts (`fraud_model.pkl`, `tfidf.pkl`) are included in the repo. To retrain from scratch:
+Trained on the [Kaggle Fake Job Postings dataset](https://www.kaggle.com/datasets/shivamb/real-or-fake-fake-jobposting-prediction) — **17,880 job postings**, 866 fraudulent (4.8%).
 
+<div align="center">
+
+| Metric | Score |
+|--------|-------|
+| ✅ Accuracy | **98.0%** |
+| 🎯 Precision | **100%** |
+| 🔍 Recall | **60.2%** |
+| ⚖️ F1-Score | **75.2%** |
+
+</div>
+
+**Model selected: Random Forest** (beat Logistic Regression on F1-score)
+
+> **100% Precision** means zero false alarms — every job the model flags as fake is genuinely fraudulent. The trade-off is 60% recall: it misses ~40% of fakes, but never incorrectly flags a real job.
+
+### How the model works
+
+1. **Text preprocessing** — job title + company profile + description + requirements are combined and cleaned
+2. **TF-IDF vectorization** — converts text into 5,000 numerical features (rare, distinctive words score highest)
+3. **Feature engineering** — adds `has_company_profile`, `has_salary_range`, `text_length`
+4. **Random Forest** — 100 decision trees vote on the final prediction
+
+To retrain from scratch:
 ```bash
 cd fake_job_detector
 python ml/train_model.py
 ```
 
-This will:
-1. Load and preprocess `data/raw/fake_job_postings.csv`
-2. Train both Logistic Regression and Random Forest
-3. Save the best model (by F1-score) to `ml/saved_model/`
+---
+
+## 📡 API Reference
+
+Base URL: `http://localhost:8000`
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | System health (Kafka, Spark, DB, ML status) |
+| `GET` | `/dashboard` | Aggregated stats snapshot |
+| `GET` | `/jobs/latest` | Last 50 processed predictions |
+| `GET` | `/jobs/fake` | All flagged fake jobs |
+| `GET` | `/alerts` | Top alerts sorted by risk score |
+| `GET` | `/trends` | Hourly fake/real job trend (24h window) |
+| `GET` | `/clusters/top` | High-pressure fraud clusters |
+| `GET` | `/corrections` | Manual human overrides |
+| `POST` | `/jobs/ingest` | Submit a new job posting for analysis |
+| `WS` | `/ws` | WebSocket — live prediction stream |
+
+Full interactive docs: **http://localhost:8000/docs**
 
 ---
 
-## Key Features
+## 📁 Project Structure
 
-- **Real-time streaming** — Spark processes Kafka micro-batches every 5 seconds
-- **ML inference at scale** — TF-IDF + Random Forest UDF runs on Spark workers
-- **Anomaly detection** — EMA-based spike detection flags unusual fraud surges
-- **Fraud clustering** — Cosine similarity groups related fake jobs (≥0.8 threshold)
-- **Human corrections** — Manual override system with correction tracking
-- **Live dashboard** — WebSocket-powered Next.js frontend with charts and alerts
-- **Dead letter queue** — Failed events captured for manual investigation
+```
+Realtime-Fake-Job-Predictor/
+├── docker-compose.yml              # Orchestrates all 7 services
+├── .env.example                    # Environment variable template
+├── start_system.py                 # Windows local dev launcher
+├── DOCKER_SETUP.md                 # Detailed Docker guide
+│
+└── fake_job_detector/
+    ├── api/                        # FastAPI backend
+    │   ├── Dockerfile
+    │   └── app.py                  # REST endpoints + WebSocket
+    │
+    ├── dashboard/                  # Next.js real-time frontend
+    │   ├── app/                    # Pages: dashboard, alerts, analytics, trends
+    │   ├── components/             # UI components
+    │   ├── context/                # Dashboard state (WebSocket + polling)
+    │   └── services/               # API client
+    │
+    ├── kafka/                      # Kafka CSV replay producer
+    │   └── producer.py
+    │
+    ├── ml/                         # Model training pipeline
+    │   ├── preprocess.py
+    │   ├── train_model.py
+    │   └── saved_model/            # fraud_model.pkl + tfidf.pkl
+    │
+    ├── spark/                      # Spark Structured Streaming job
+    │   ├── spark_stream.py         # Main streaming driver
+    │   ├── model_loader.py         # ML inference UDF
+    │   └── Dockerfile
+    │
+    ├── utils/                      # DB writer, config, helpers
+    └── data/raw/                   # fake_job_postings.csv (17,880 rows)
+```
 
 ---
 
-## Environment Variables
+## ⚙️ Environment Variables
 
-See [`.env.example`](.env.example) for the full list. Key settings:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POSTGRES_PASSWORD` | *(required)* | Database password |
+| `SPARK_TRIGGER_INTERVAL` | `5 seconds` | Spark micro-batch cadence |
+| `SPARK_MAX_OFFSETS_PER_TRIGGER` | `700` | Records per Spark batch |
+| `ANOMALY_EMA_ALPHA` | `0.2` | EMA smoothing factor |
+| `ANOMALY_SPIKE_MULTIPLIER` | `2.2` | Spike threshold multiplier |
+| `DASHBOARD_PORT` | `3001` | Host port for Next.js dashboard |
+| `REPLAY_SPEED` | `10.0` | CSV replay speed (10x = 10× faster) |
+| `MAX_KAFKA_LAG` | `5000` | Producer throttle threshold |
 
-| Variable                     | Default                    | Description                        |
-|------------------------------|----------------------------|------------------------------------|
-| `POSTGRES_PASSWORD`          | *(required)*               | Database password                  |
-| `SPARK_TRIGGER_INTERVAL`     | `5 seconds`                | Spark micro-batch cadence          |
-| `SPARK_MAX_OFFSETS_PER_TRIGGER` | `700`                   | Records per Spark batch            |
-| `DASHBOARD_PORT`             | `3001`                     | Host port for Next.js dashboard    |
-| `REPLAY_SPEED`               | `10.0`                     | CSV replay speed multiplier        |
+See [`.env.example`](.env.example) for the full list.
 
 ---
 
-## Load Testing
+## 🧪 Load Testing
 
 ```bash
 python fake_job_detector/load_test.py \
@@ -195,6 +270,25 @@ python fake_job_detector/load_test.py \
 
 ---
 
-## Dataset
+## 🤝 Contributing
 
-[Real or Fake: Fake Job Posting Prediction](https://www.kaggle.com/datasets/shivamb/real-or-fake-fake-jobposting-prediction) — 17,880 job postings, 866 fraudulent (4.8%).
+Contributions are welcome! Please open an issue first to discuss what you'd like to change.
+
+1. Fork the repo
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Commit your changes: `git commit -m 'Add your feature'`
+4. Push and open a Pull Request
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+<div align="center">
+
+**If you found this useful, please consider giving it a ⭐**
+
+</div>
