@@ -1,0 +1,25 @@
+# Build context: fake_job_detector/dashboard/
+# Used by: dashboard/Dockerfile
+
+# Dependencies installed inside the image
+node_modules/
+.pnpm-store/
+
+# Previous builds
+.next/
+out/
+
+# Local env — NEXT_PUBLIC_* vars are passed as build args
+.env
+.env.local
+.env.*.local
+
+# OS/IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Git
+.git/
+.gitignore

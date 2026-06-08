@@ -1,0 +1,295 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 — persistent prediction store
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: fraud-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fake_jobs_db}
+      POSTGRES_USER: ${POSTGRES_USER:-fraud_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fraud_user} -d ${POSTGRES_DB:-fake_jobs_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - fraud-net
+
+  # ---------------------------------------------------------------------------
+  # Kafka 3.8 — KRaft mode (no Zookeeper), official Apache image
+  # Internal listener : kafka:9092   (used by all containers)
+  # External listener : localhost:9094 (optional host access)
+  # CLUSTER_ID is a fixed base64-UUID — must stay constant across restarts.
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: fraud-kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: "3"
+      KAFKA_LOG_RETENTION_HOURS: "168"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    ports:
+      - "9094:9094"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - fraud-net
+
+  # ---------------------------------------------------------------------------
+  # Spark Master — standalone cluster coordinator
+  # UI available at http://localhost:8080
+  # ---------------------------------------------------------------------------
+  spark-master:
+    build:
+      context: ./fake_job_detector
+      dockerfile: spark/Dockerfile
+    image: fraud-spark:latest
+    container_name: fraud-spark-master
+    restart: unless-stopped
+    environment:
+      SPARK_MODE: master
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8080"
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - spark_ivy_cache:/app/.ivy2
+      - spark_checkpoints:/app/output/checkpoints
+      - spark_logs:/app/output/logs
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 45s
+    networks:
+      - fraud-net
+
+  # ---------------------------------------------------------------------------
+  # Spark Worker — executes Python UDFs and ML inference
+  # Needs the same Python environment as the driver (shared custom image)
+  # ---------------------------------------------------------------------------
+  spark-worker:
+    build:
+      context: ./fake_job_detector
+      dockerfile: spark/Dockerfile
+    image: fraud-spark:latest
+    container_name: fraud-spark-worker
+    restart: unless-stopped
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-1G}
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-2}
+      SPARK_WORKER_WEBUI_PORT: "8081"
+    ports:
+      - "8081:8081"
+    volumes:
+      - spark_ivy_cache:/app/.ivy2
+      - spark_checkpoints:/app/output/checkpoints
+      - spark_logs:/app/output/logs
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    networks:
+      - fraud-net
+
+  # ---------------------------------------------------------------------------
+  # Spark Stream — streaming driver process
+  # Submits to spark://spark-master:7077, workers execute UDFs
+  # ---------------------------------------------------------------------------
+  spark-stream:
+    build:
+      context: ./fake_job_detector
+      dockerfile: spark/Dockerfile
+    image: fraud-spark:latest
+    container_name: fraud-spark-stream
+    restart: unless-stopped
+    entrypoint: ["python", "/app/spark/spark_stream.py"]
+    environment:
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_DRIVER_HOST: spark-stream
+      SPARK_DRIVER_BIND_ADDRESS: "0.0.0.0"
+      SPARK_IVY_PATH: /app/.ivy2
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fraud_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fake_jobs_db}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_JOBS_TOPIC: ${KAFKA_JOBS_TOPIC:-jobs}
+      KAFKA_PROCESSED_TOPIC: ${KAFKA_PROCESSED_TOPIC:-processed_jobs}
+      MODEL_PATH: /app/ml/saved_model/fraud_model.pkl
+      TFIDF_PATH: /app/ml/saved_model/tfidf.pkl
+      SPARK_CHECKPOINT_LOCATION: /app/output/checkpoints/jobs_stream
+      SPARK_WINDOW_CHECKPOINT_LOCATION: /app/output/checkpoints/jobs_window
+      SPARK_TRIGGER_INTERVAL: ${SPARK_TRIGGER_INTERVAL:-5 seconds}
+      SPARK_MAX_OFFSETS_PER_TRIGGER: ${SPARK_MAX_OFFSETS_PER_TRIGGER:-700}
+      ENABLE_PROCESSED_TOPIC: ${ENABLE_PROCESSED_TOPIC:-false}
+      DB_MAX_RETRY_ATTEMPTS: "8"
+      DB_MAX_RETRY_BACKLOG: "20000"
+      ANOMALY_EMA_ALPHA: ${ANOMALY_EMA_ALPHA:-0.2}
+      ANOMALY_SPIKE_MULTIPLIER: ${ANOMALY_SPIKE_MULTIPLIER:-2.2}
+      ANOMALY_RATE_MULTIPLIER: ${ANOMALY_RATE_MULTIPLIER:-1.8}
+      ANOMALY_RATE_THRESHOLD: ${ANOMALY_RATE_THRESHOLD:-0.55}
+      LOCAL_DLQ_PATH: /app/output/dead_letter/dead_letter_events.jsonl
+    ports:
+      - "4040:4040"
+    volumes:
+      - spark_ivy_cache:/app/.ivy2
+      - spark_checkpoints:/app/output/checkpoints
+      - spark_logs:/app/output/logs
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_started
+    networks:
+      - fraud-net
+
+  # ---------------------------------------------------------------------------
+  # FastAPI — REST + WebSocket telemetry service
+  # ---------------------------------------------------------------------------
+  fraud-api:
+    build:
+      context: ./fake_job_detector
+      dockerfile: api/Dockerfile
+    container_name: fraud-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fraud_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fake_jobs_db}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_JOBS_TOPIC: ${KAFKA_JOBS_TOPIC:-jobs}
+      MODEL_PATH: /app/ml/saved_model/fraud_model.pkl
+      TFIDF_PATH: /app/ml/saved_model/tfidf.pkl
+      API_CORS_ORIGINS: ${API_CORS_ORIGINS:-http://localhost:3000}
+      API_DB_POOL_MIN: ${API_DB_POOL_MIN:-1}
+      API_DB_POOL_MAX: ${API_DB_POOL_MAX:-10}
+      API_WS_INTERVAL_SECONDS: ${API_WS_INTERVAL_SECONDS:-1.0}
+      API_LOG_LEVEL: ${API_LOG_LEVEL:-INFO}
+      SPARK_DOWN_LAG_THRESHOLD: ${SPARK_DOWN_LAG_THRESHOLD:-2000}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\" 2>/dev/null || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 25s
+    networks:
+      - fraud-net
+
+  # ---------------------------------------------------------------------------
+  # Next.js Dashboard — real-time UI (browser connects to host ports)
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build:
+      context: ./fake_job_detector/dashboard
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8000}
+    container_name: fraud-dashboard
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-3000}:3000"
+    depends_on:
+      fraud-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000 > /dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - fraud-net
+
+  # ---------------------------------------------------------------------------
+  # Job Producer — optional: replay CSV events into Kafka
+  # Run with: docker compose --profile producer up job-producer
+  # Or:       docker compose run --rm job-producer
+  # ---------------------------------------------------------------------------
+  job-producer:
+    build:
+      context: ./fake_job_detector
+      dockerfile: kafka/Dockerfile
+    container_name: fraud-producer
+    restart: "no"
+    profiles:
+      - producer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_JOBS_TOPIC: ${KAFKA_JOBS_TOPIC:-jobs}
+      JOBS_SOURCE_FILE: /app/data/raw/fake_job_postings.csv
+      REPLAY_SPEED: ${REPLAY_SPEED:-10.0}
+      MAX_KAFKA_LAG: ${MAX_KAFKA_LAG:-5000}
+      LAG_CHECK_EVERY: ${LAG_CHECK_EVERY:-50}
+      KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-spark_jobs_stream}
+      SYSTEM_METRICS_URL: http://fraud-api:8000/system-metrics
+    volumes:
+      - ./fake_job_detector/data:/app/data:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - fraud-net
+
+# =============================================================================
+# Named volumes — survive docker compose down / up
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  kafka_data:
+    driver: local
+  spark_ivy_cache:
+    driver: local
+  spark_checkpoints:
+    driver: local
+  spark_logs:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  fraud-net:
+    driver: bridge
